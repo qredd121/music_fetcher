@@ -1,0 +1,26 @@
+# secrets
+.env
+
+# runtime data (slskd downloads, container state)
+data/
+
+# local state (jobs.db, generated beets config, library.db)
+*.db
+*.sqlite*
+beets_config.yaml
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+
+# editors
+.idea/
+.vscode/

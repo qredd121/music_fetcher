@@ -1,0 +1,18 @@
+services:
+  slskd:
+    image: slskd/slskd:latest
+    container_name: slskd
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "5030:5030"
+    volumes:
+      - ./data/slskd:/app
+      - ./data/downloads:/downloads
+    environment:
+      - SLSKD_SLSK_USERNAME=${SLSKD_SLSK_USERNAME}
+      - SLSKD_SLSK_PASSWORD=${SLSKD_SLSK_PASSWORD}
+      - SLSKD_API_KEY=${SLSKD_API_KEY}
+      - SLSKD_WEB_USERNAME=${SLSKD_WEB_USERNAME}
+      - SLSKD_WEB_PASSWORD=${SLSKD_WEB_PASSWORD}
+      - SLSKD_DOWNLOADS_DIR=/downloads

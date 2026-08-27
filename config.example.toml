@@ -1,0 +1,28 @@
+musicbrainz_contact = "you@example.com"
+log_level = "INFO"
+
+[slskd]
+base_url = "http://localhost:5030"
+api_prefix = "/api/v0"
+timeout = 30.0
+
+[paths]
+downloads = "~/Work/personal/music-fetcher/data/downloads"
+music = "~/Music"
+state = "~/.local/state/music-fetcher"
+
+[search]
+timeout = 45.0
+poll_interval = 1.5
+
+[download]
+format_preference = ["FLAC", "MP3 320", "MP3 V0"]
+timeout = 1800.0
+retries = 2
+stall_seconds = 300.0
+queue_wait_seconds = 600.0
+
+[beets]
+plugins = ["fetchart", "duplicates"]
+quiet_fallback = "skip"
+move_imported = true

@@ -1,0 +1,41 @@
+[project]
+name = "music-fetcher"
+version = "0.1.0"
+description = "CLI wrapper for slskd and beets: download albums and manage a music library"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "musicbrainzngs>=0.7",
+    "beets>=2.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "respx>=0.21",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+music-fetcher = "music_fetcher.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/music_fetcher"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
