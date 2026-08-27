@@ -33,6 +33,11 @@ def generate_config(config: AppConfig) -> Path:
             "duplicate_action": "skip",
             "languages": "en",
         },
+        "paths": {
+            "default": "%upper{%left{$albumartist,1}}/$albumartist/$year - $album%aunique{}/$track - $title",
+            "singleton": "%upper{%left{$artist,1}}/$artist/$title",
+            "comp": "%upper{%left{$albumartist,1}}/$albumartist/$year - $album%aunique{}/$track - $title",
+        },
         "fetchart": {
             "auto": True,
             "minwidth": 300,
@@ -97,6 +102,7 @@ def import_path(
     *,
     interactive: bool = False,
     singletons: bool = False,
+    mbid: str | None = None,
 ) -> ImportOutcome:
     generate_config(config)
     args = ["import"]
@@ -104,8 +110,10 @@ def import_path(
         args.append("--quiet")
     if singletons:
         args.append("--singletons")
+    if mbid:
+        args.extend(["--search-id", mbid])
     extra = None
-    if singletons and not interactive:
+    if not interactive and (singletons or mbid):
         extra = {"import": {"quiet_fallback": "asis"}}
     args.append(str(source))
     try:

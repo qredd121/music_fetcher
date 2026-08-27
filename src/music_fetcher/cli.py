@@ -16,14 +16,20 @@ from .jobs import ACTIVE_STATES, Runner
 from .jobs.db import JobStore
 from .musicbrainz import Release, get_release, search_releases
 from .selection import (
-    audio_files,
     best_single_file,
     common_remote_dir,
     meets_format_preference,
     score_candidates,
 )
-from .slskd import SearchResult, SlskdClient, SlskdError
-from .ui import confirm, console, format_size, pick_index, print_search_table
+from .slskd import SlskdClient, SlskdError
+from .ui import (
+    confirm,
+    console,
+    format_size,
+    pick_index,
+    print_candidate_table,
+    print_search_table,
+)
 
 app = typer.Typer(
     name="music-fetcher",
@@ -349,7 +355,14 @@ def import_(
         handled_dirs.add(source.name)
         label = job.id[:8] if job is not None else source.name
         console.print(f"importing {label} [dim]{source}[/dim]")
-        outcome = import_path(config, source, interactive=interactive, singletons=singletons)
+        mbid = job.mbid if (job is not None and job.kind == "album") else None
+        outcome = import_path(
+            config,
+            source,
+            interactive=interactive,
+            singletons=singletons,
+            mbid=mbid,
+        )
         if outcome.state == "imported":
             if job is not None:
                 store.update_state(job.id, "imported", error=None)
@@ -375,7 +388,11 @@ def import_(
             continue
         console.print(f"retrying quarantined {job.id[:8]} [dim]{quarantine_dir}[/dim]")
         outcome = import_path(
-            config, quarantine_dir, interactive=interactive, singletons=job.kind == "track"
+            config,
+            quarantine_dir,
+            interactive=interactive,
+            singletons=job.kind == "track",
+            mbid=job.mbid if job.kind == "album" else None,
         )
         if outcome.state == "imported":
             store.update_state(job.id, "imported", error=None)
@@ -506,28 +523,23 @@ def _choose_release(
     return get_release(chosen.mbid, contact=config.musicbrainz_contact)
 
 
-def _pick_candidate(
-    candidates, chain: list[str], expected: int | None, auto: bool
-) -> SearchResult | None:
+def _pick_candidate(candidates, chain: list[str], expected: int | None, auto: bool):
     while True:
         if auto:
-            return candidates[0].result if candidates else None
-        print_search_table([c.result for c in candidates], chain=chain, expected=expected)
+            return candidates[0] if candidates else None
+        print_candidate_table(candidates, chain=chain, expected=expected)
         choice = pick_index(len(candidates))
         if choice is None:
             return None
         if choice == -1:
             continue
-        return candidates[choice].result
+        return candidates[choice]
 
 
-def _format_gate(
-    candidates, chosen: SearchResult, chain: list[str], auto: bool
-) -> bool:
-    candidate = next(c for c in candidates if c.result is chosen)
+def _format_gate(candidate, chain: list[str], auto: bool) -> bool:
     if meets_format_preference(candidate, chain):
         return True
-    available = sorted({f.extension for f in audio_files(chosen)})
+    available = sorted({f.extension for f in candidate.files})
     console.print(
         f"[yellow]preferred formats {chain} unavailable; "
         f"this source offers: {', '.join(available)}[/yellow]"
@@ -557,18 +569,24 @@ def _wait_for_job(config, store, job) -> None:
 
 @dl_app.command("album")
 def dl_album(
-    query: str = typer.Argument(None, help='e.g. "aphex twin selected ambient works"'),
+    query: str = typer.Argument(None, help='e.g. "i hate myself 10 songs"'),
+    artist: str = typer.Option(None, "--artist", "-a", help="Artist name (precise)."),
+    album: str = typer.Option(None, "--album", "-b", help="Album title (precise)."),
     mbid: str | None = typer.Option(None, help="MusicBrainz release ID, skips lookup."),
     yes: bool = typer.Option(False, "--yes", help="Non-interactive, auto-pick best."),
     no_wait: bool = typer.Option(False, "--no-wait", help="Queue without downloading now."),
 ) -> None:
     """Resolve an album on MusicBrainz, find it on Soulseek, download it."""
-    if not query and not mbid:
-        console.print("[red]need a query or --mbid[/red]")
+    if not query and not mbid and not (artist and album):
+        console.print("[red]need a query, --artist/--album, or --mbid[/red]")
         raise SystemExit(1)
     config = load_config()
     ensure_dirs(config)
-    release = _choose_release(query or "", mbid, config, auto=yes)
+    if artist and album:
+        mb_query = f'artist:"{artist}" AND release:"{album}"'
+    else:
+        mb_query = query or ""
+    release = _choose_release(mb_query, mbid, config, auto=yes)
     if release is None:
         return
 
@@ -581,7 +599,13 @@ def dl_album(
             timeout=config.search.timeout,
             poll_interval=config.search.poll_interval,
         )
-    candidates = score_candidates(results, chain, expected_tracks=release.track_count)
+    candidates = score_candidates(
+        results,
+        chain,
+        expected_tracks=release.track_count,
+        artist=release.artist,
+        album=release.title,
+    )
     if not candidates:
         console.print("[yellow]no usable sources found[/yellow]")
         return
@@ -589,11 +613,11 @@ def dl_album(
     chosen = _pick_candidate(candidates, chain, release.track_count, auto=yes)
     if chosen is None:
         return
-    if not _format_gate(candidates, chosen, chain, auto=yes):
+    if not _format_gate(chosen, chain, auto=yes):
         console.print("aborted")
         return
 
-    files = audio_files(chosen)
+    files = chosen.files
     remote_dir = common_remote_dir(files)
     store = JobStore(config.paths.state / "jobs.db")
     job = store.create(
@@ -640,13 +664,13 @@ def dl_track(
     chosen = _pick_candidate(candidates, chain, None, auto=yes)
     if chosen is None:
         return
-    if not _format_gate(candidates, chosen, chain, auto=yes):
+    if not _format_gate(chosen, chain, auto=yes):
         console.print("aborted")
         return
 
-    files = audio_files(chosen)
+    files = chosen.files
     if yes or len(files) == 1:
-        selected_files = [best_single_file(chosen, chain)]
+        selected_files = [best_single_file(files, chain)]
     else:
         table = Table(title=f"files from {chosen.username}")
         table.add_column("#", justify="right")

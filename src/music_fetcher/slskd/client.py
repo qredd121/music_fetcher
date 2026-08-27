@@ -113,24 +113,38 @@ class SlskdClient:
         search_id = uuid.uuid4()
         payload = {"id": str(search_id), "searchText": text}
         response = self._client.post(self._url("/searches"), json=payload)
+        if response.status_code == 409:
+            self._purge_searches()
+            response = self._client.post(self._url("/searches"), json=payload)
         if response.status_code >= 400:
             raise SlskdError(f"search request failed: HTTP {response.status_code}")
 
-        deadline = time.monotonic() + timeout
-        terminal = {"Complete", "TimedOut", "ResponseLimitReached", "Cancelled"}
-        while time.monotonic() < deadline:
-            status = self._client.get(self._url(f"/searches/{search_id}"))
-            if status.status_code >= 400:
-                raise SlskdError(f"search poll failed: HTTP {status.status_code}")
-            state = str(status.json().get("state", ""))
-            if state in terminal:
-                break
-            time.sleep(poll_interval)
+        try:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                status = self._client.get(self._url(f"/searches/{search_id}"))
+                if status.status_code >= 400:
+                    raise SlskdError(f"search poll failed: HTTP {status.status_code}")
+                state = str(status.json().get("state", ""))
+                if "Complete" in state or "Cancelled" in state:
+                    break
+                time.sleep(poll_interval)
 
-        responses = self._client.get(self._url(f"/searches/{search_id}/responses"))
-        if responses.status_code >= 400:
-            raise SlskdError(f"search results failed: HTTP {responses.status_code}")
-        return [SearchResult.from_api(item) for item in responses.json()]
+            responses = self._client.get(self._url(f"/searches/{search_id}/responses"))
+            if responses.status_code >= 400:
+                raise SlskdError(f"search results failed: HTTP {responses.status_code}")
+            return [SearchResult.from_api(item) for item in responses.json()]
+        finally:
+            self._client.delete(self._url(f"/searches/{search_id}"))
+
+    def _purge_searches(self) -> None:
+        listing = self._client.get(self._url("/searches"))
+        if listing.status_code >= 400:
+            return
+        for item in listing.json():
+            search_id = item.get("id")
+            if search_id:
+                self._client.delete(self._url(f"/searches/{search_id}"))
 
     def enqueue(self, username: str, files: Sequence[SearchFile]) -> None:
         payload = [{"filename": f.filename, "size": f.size} for f in files]

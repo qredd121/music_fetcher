@@ -4,7 +4,13 @@ from rich.console import Console
 from rich.prompt import Confirm
 from rich.table import Table
 
-from .selection import audio_files, average_bitrate, best_format, format_rank
+from .selection import (
+    ScoredCandidate,
+    audio_files,
+    average_bitrate,
+    best_format,
+    format_rank,
+)
 from .slskd import SearchResult
 
 console = Console()
@@ -99,3 +105,47 @@ def pick_index(count: int, allow_refresh: bool = True) -> int | None:
 
 def confirm(question: str, default: bool = False) -> bool:
     return Confirm.ask(question, default=default)
+
+
+def print_candidate_table(
+    candidates: list[ScoredCandidate],
+    *,
+    chain: list[str],
+    expected: int | None = None,
+) -> None:
+    table = Table(title="Sources", show_lines=False)
+    table.add_column("#", justify="right")
+    table.add_column("User")
+    table.add_column("Folder")
+    table.add_column("Format")
+    if expected:
+        table.add_column("Tracks", justify="right")
+    table.add_column("Files", justify="right")
+    table.add_column("Size", justify="right")
+    table.add_column("Slot")
+    table.add_column("Bitrate", justify="right")
+
+    for index, cand in enumerate(candidates):
+        style = "green" if cand.format_rank < len(chain) else "yellow"
+        formats = "/".join(sorted({f.extension for f in cand.files}))
+        slot = "[green]free[/green]" if cand.has_free_slot else "[red]queued[/red]"
+        row = [
+            str(index),
+            cand.username[:18],
+            cand.folder_name[:40],
+            f"[{style}]{formats}[/{style}]",
+        ]
+        if expected:
+            count = len(cand.files)
+            match = "[green]✓[/green]" if count == expected else f"[yellow]{count}[/yellow]"
+            row.append(f"{match}/{expected}")
+        row.extend(
+            [
+                str(len(cand.files)),
+                _fmt_size(cand.total_size),
+                slot,
+                str(cand.bitrate or "-"),
+            ]
+        )
+        table.add_row(*row)
+    console.print(table)
