@@ -16,6 +16,7 @@ from .jobs import ACTIVE_STATES, Runner
 from .jobs.db import JobStore
 from .musicbrainz import Release, get_release, search_releases
 from .selection import (
+    ScoredCandidate,
     best_single_file,
     common_remote_dir,
     meets_format_preference,
@@ -28,7 +29,6 @@ from .ui import (
     format_size,
     pick_index,
     print_candidate_table,
-    print_search_table,
 )
 
 app = typer.Typer(
@@ -48,6 +48,37 @@ def _main(
     from .logging_setup import configure_logging
 
     configure_logging(log_level)
+
+
+def _emit_json(payload: object) -> None:
+    """Write a JSON document to stdout for machine/agent consumption."""
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
+def _err_console():
+    """A Rich console bound to stderr, so stdout stays pure JSON."""
+    from rich.console import Console
+
+    return Console(stderr=True)
+
+
+def _search_candidates(
+    config, search_text: str, *, artist: str = "", album: str = "",
+    expected_tracks: int | None = None,
+) -> list[ScoredCandidate]:
+    client = SlskdClient(config.slskd)
+    results = client.search(
+        search_text,
+        timeout=config.search.timeout,
+        poll_interval=config.search.poll_interval,
+    )
+    return score_candidates(
+        results,
+        config.download.format_preference,
+        expected_tracks=expected_tracks,
+        artist=artist,
+        album=album,
+    )
 
 
 daemon_app = typer.Typer(help="Manage the slskd docker container.", no_args_is_help=True)
@@ -260,40 +291,29 @@ def doctor() -> None:
 def search(
     query: str = typer.Argument(..., help="Search text sent to slskd."),
     timeout: float | None = typer.Option(None, help="Seconds to wait for responses."),
-    max_results: int = typer.Option(25, help="Rows to show after sorting."),
+    max_results: int = typer.Option(25, help="Max candidates to return."),
 ) -> None:
-    """Search the Soulseek network and pick a result interactively."""
+    """Search the Soulseek network; print album-folder candidates as JSON.
+
+    Output is a single JSON document with a ``results`` array. Each result has a
+    stable ``id`` that can be passed to ``dl ... --result-id`` to download it.
+    """
     config = load_config()
-    client = SlskdClient(config.slskd)
     effective_timeout = timeout if timeout is not None else config.search.timeout
+    config.search.timeout = effective_timeout
 
-    with console.status(f"searching for {query!r}..."):
-        results = client.search(
-            query,
-            timeout=effective_timeout,
-            poll_interval=config.search.poll_interval,
-        )
+    # Seed relevance from the free-text query so ranking is meaningful.
+    candidates = _search_candidates(config, query, album=query)
+    candidates = candidates[:max_results]
+    chain = config.download.format_preference
 
-    results.sort(key=lambda r: (not r.has_free_slot, -len(r.files)))
-    results = results[:max_results]
-
-    if not results:
-        console.print("[yellow]no results[/yellow]")
-        return
-
-    while True:
-        print_search_table(results)
-        choice = pick_index(len(results))
-        if choice is None:
-            return
-        if choice == -1:
-            continue
-        selected = results[choice]
-        console.print(
-            f"[green]selected[/green] {selected.username}: "
-            f"{selected.folder} ({len(selected.files)} files)"
-        )
-        return
+    _emit_json(
+        {
+            "query": query,
+            "count": len(candidates),
+            "results": [c.to_dict(chain) for c in candidates],
+        }
+    )
 
 
 dl_app = typer.Typer(help="Search and download music.", no_args_is_help=True)
@@ -516,14 +536,16 @@ def lib_beet(ctx: typer.Context) -> None:
 
 
 def _choose_release(
-    query: str, mbid: str | None, config, auto: bool
+    query: str, mbid: str | None, config, auto: bool, quiet: bool = False
 ) -> Release | None:
+    # In quiet mode (JSON paths) keep stdout clean: status + notices go to stderr.
+    status_console = _err_console() if quiet else console
     if mbid:
         return get_release(mbid, contact=config.musicbrainz_contact)
-    with console.status("searching MusicBrainz..."):
+    with status_console.status("searching MusicBrainz..."):
         summaries = search_releases(query, contact=config.musicbrainz_contact)
     if not summaries:
-        console.print("[yellow]no MusicBrainz releases matched[/yellow]")
+        status_console.print("[yellow]no MusicBrainz releases matched[/yellow]")
         return None
     if auto:
         chosen = summaries[0]
@@ -549,7 +571,7 @@ def _choose_release(
         if index is None:
             return None
         chosen = summaries[index]
-    console.print(f"release: [bold]{chosen.artist} — {chosen.title}[/bold]")
+    status_console.print(f"release: [bold]{chosen.artist} — {chosen.title}[/bold]")
     return get_release(chosen.mbid, contact=config.musicbrainz_contact)
 
 
@@ -580,6 +602,20 @@ def _format_gate(candidate, chain: list[str], auto: bool) -> bool:
     return confirm("download this format anyway?", default=False)
 
 
+def _find_by_id(candidates: list[ScoredCandidate], result_id: str) -> ScoredCandidate | None:
+    return next((c for c in candidates if c.id == result_id), None)
+
+
+def _job_dict(job, chosen: ScoredCandidate, remote_dir: str) -> dict:
+    return {
+        "job_id": job.id,
+        "state": job.state,
+        "username": chosen.username,
+        "file_count": len(chosen.files),
+        "remote_dir": remote_dir,
+    }
+
+
 def _wait_for_job(config, store, job) -> None:
     runner = Runner(config, store)
     with Progress() as progress:
@@ -603,10 +639,21 @@ def dl_album(
     artist: str = typer.Option(None, "--artist", "-a", help="Artist name (precise)."),
     album: str = typer.Option(None, "--album", "-b", help="Album title (precise)."),
     mbid: str | None = typer.Option(None, help="MusicBrainz release ID, skips lookup."),
+    result_id: str | None = typer.Option(
+        None, "--result-id", help="Download a specific source by id (from --list)."
+    ),
+    list_sources: bool = typer.Option(
+        False, "--list", help="Print Soulseek candidates as JSON without downloading."
+    ),
     yes: bool = typer.Option(False, "--yes", help="Non-interactive, auto-pick best."),
     no_wait: bool = typer.Option(False, "--no-wait", help="Queue without downloading now."),
 ) -> None:
-    """Resolve an album on MusicBrainz, find it on Soulseek, download it."""
+    """Resolve an album on MusicBrainz, find it on Soulseek, download it.
+
+    MusicBrainz is authoritative: the release is resolved first, then the
+    Soulseek search runs on the canonical ``artist title``. Use ``--list`` to
+    get JSON candidates (each with an ``id``), then re-run with ``--result-id``.
+    """
     if not query and not mbid and not (artist and album):
         console.print("[red]need a query, --artist/--album, or --mbid[/red]")
         raise SystemExit(1)
@@ -616,36 +663,55 @@ def dl_album(
         mb_query = f'artist:"{artist}" AND release:"{album}"'
     else:
         mb_query = query or ""
-    release = _choose_release(mb_query, mbid, config, auto=yes)
+    # --list / --result-id are non-interactive discovery paths: auto-pick the MB
+    # release and keep stdout pure JSON (status goes to stderr).
+    json_mode = list_sources or result_id is not None
+    auto_mb = yes or json_mode
+    release = _choose_release(mb_query, mbid, config, auto=auto_mb, quiet=json_mode)
     if release is None:
         return
 
     chain = config.download.format_preference
     search_text = f"{release.artist} {release.title}"
-    client = SlskdClient(config.slskd)
-    with console.status(f"searching slskd for {search_text!r}..."):
-        results = client.search(
-            search_text,
-            timeout=config.search.timeout,
-            poll_interval=config.search.poll_interval,
-        )
-    candidates = score_candidates(
-        results,
-        chain,
-        expected_tracks=release.track_count,
+    candidates = _search_candidates(
+        config,
+        search_text,
         artist=release.artist,
         album=release.title,
+        expected_tracks=release.track_count,
     )
+
+    if list_sources:
+        _emit_json(
+            {
+                "release": {
+                    "mbid": release.mbid,
+                    "artist": release.artist,
+                    "title": release.title,
+                    "track_count": release.track_count,
+                },
+                "count": len(candidates),
+                "results": [c.to_dict(chain) for c in candidates],
+            }
+        )
+        return
+
     if not candidates:
         console.print("[yellow]no usable sources found[/yellow]")
         return
 
-    chosen = _pick_candidate(candidates, chain, release.track_count, auto=yes)
-    if chosen is None:
-        return
-    if not _format_gate(chosen, chain, auto=yes):
-        console.print("aborted")
-        return
+    if result_id is not None:
+        chosen = _find_by_id(candidates, result_id)
+        if chosen is None:
+            _emit_json({"error": "result_id_not_found", "id": result_id})
+            raise SystemExit(1)
+    else:
+        chosen = _pick_candidate(candidates, chain, release.track_count, auto=yes)
+        if chosen is None:
+            return
+        if not _format_gate(chosen, chain, auto=yes):
+            console.print("aborted")
+            return
 
     files = chosen.files
     remote_dir = common_remote_dir(files)
@@ -663,7 +729,10 @@ def dl_album(
             "tracklist": [t.title for t in release.tracks],
         },
     )
-    console.print(f"queued job [bold]{job.id[:8]}[/bold] from {chosen.username}")
+    if result_id is not None:
+        _emit_json(_job_dict(job, chosen, remote_dir))
+    else:
+        console.print(f"queued job [bold]{job.id[:8]}[/bold] from {chosen.username}")
     if no_wait:
         return
     _wait_for_job(config, store, job)
@@ -672,34 +741,54 @@ def dl_album(
 @dl_app.command("track")
 def dl_track(
     query: str = typer.Argument(..., help="Search text for a single track."),
+    result_id: str | None = typer.Option(
+        None, "--result-id", help="Download a specific source by id (from --list)."
+    ),
+    list_sources: bool = typer.Option(
+        False, "--list", help="Print Soulseek candidates as JSON without downloading."
+    ),
     yes: bool = typer.Option(False, "--yes", help="Auto-pick best file."),
     no_wait: bool = typer.Option(False, "--no-wait", help="Queue without downloading now."),
 ) -> None:
-    """Search and download a single track."""
+    """Search and download a single track.
+
+    Use ``--list`` to get JSON candidates (each with an ``id``), then re-run with
+    ``--result-id`` to download a specific source non-interactively.
+    """
     config = load_config()
     ensure_dirs(config)
     chain = config.download.format_preference
-    client = SlskdClient(config.slskd)
-    with console.status(f"searching slskd for {query!r}..."):
-        results = client.search(
-            query,
-            timeout=config.search.timeout,
-            poll_interval=config.search.poll_interval,
+    candidates = _search_candidates(config, query, expected_tracks=1)
+
+    if list_sources:
+        _emit_json(
+            {
+                "query": query,
+                "count": len(candidates),
+                "results": [c.to_dict(chain) for c in candidates],
+            }
         )
-    candidates = score_candidates(results, chain, expected_tracks=1)
+        return
+
     if not candidates:
         console.print("[yellow]no usable sources found[/yellow]")
         return
 
-    chosen = _pick_candidate(candidates, chain, None, auto=yes)
-    if chosen is None:
-        return
-    if not _format_gate(chosen, chain, auto=yes):
-        console.print("aborted")
-        return
+    if result_id is not None:
+        chosen = _find_by_id(candidates, result_id)
+        if chosen is None:
+            _emit_json({"error": "result_id_not_found", "id": result_id})
+            raise SystemExit(1)
+    else:
+        chosen = _pick_candidate(candidates, chain, None, auto=yes)
+        if chosen is None:
+            return
+        if not _format_gate(chosen, chain, auto=yes):
+            console.print("aborted")
+            return
 
     files = chosen.files
-    if yes or len(files) == 1:
+    if result_id is not None or yes or len(files) == 1:
         selected_files = [best_single_file(files, chain)]
     else:
         table = Table(title=f"files from {chosen.username}")
@@ -728,7 +817,18 @@ def dl_track(
             "files": [{"filename": f.filename, "size": f.size} for f in selected_files],
         },
     )
-    console.print(f"queued job [bold]{job.id[:8]}[/bold] from {chosen.username}")
+    if result_id is not None:
+        _emit_json(
+            {
+                "job_id": job.id,
+                "state": job.state,
+                "username": chosen.username,
+                "file_count": len(selected_files),
+                "remote_dir": remote_dir,
+            }
+        )
+    else:
+        console.print(f"queued job [bold]{job.id[:8]}[/bold] from {chosen.username}")
     if no_wait:
         return
     _wait_for_job(config, store, job)

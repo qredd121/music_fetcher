@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 
@@ -74,6 +75,18 @@ def _dir_of(filename: str) -> str:
     return normalized.rsplit("/", 1)[0] if "/" in normalized else ""
 
 
+def candidate_id(username: str, folder: str) -> str:
+    """Deterministic short id for a (user, folder) source.
+
+    Stable across searches so an agent can pass the id from ``search`` back to
+    ``dl`` even though slskd searches are ephemeral. Normalizes the folder path
+    (backslashes, trailing slash, case) before hashing.
+    """
+    normalized = folder.replace("\\", "/").rstrip("/").lower()
+    digest = hashlib.sha256(f"{username}\x00{normalized}".encode()).hexdigest()
+    return digest[:12]
+
+
 @dataclass
 class ScoredCandidate:
     username: str
@@ -87,12 +100,38 @@ class ScoredCandidate:
     relevance: float = 0.0
 
     @property
+    def id(self) -> str:
+        return candidate_id(self.username, self.folder)
+
+    @property
     def folder_name(self) -> str:
         return self.folder.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
 
     @property
     def total_size(self) -> int:
         return sum(f.size for f in self.files)
+
+    def to_dict(self, chain: list[str]) -> dict:
+        return {
+            "id": self.id,
+            "username": self.username,
+            "folder": self.folder_name,
+            "remote_dir": common_remote_dir(self.files),
+            "formats": sorted({f.extension for f in self.files if f.extension}),
+            "format_rank": self.format_rank,
+            "meets_preference": meets_format_preference(self, chain),
+            "file_count": len(self.files),
+            "total_size": self.total_size,
+            "avg_bitrate": self.bitrate,
+            "has_free_slot": self.has_free_slot,
+            "upload_speed": self.upload_speed,
+            "completeness": round(self.completeness, 4),
+            "relevance": round(self.relevance, 4),
+            "files": [
+                {"filename": f.filename, "size": f.size, "extension": f.extension}
+                for f in self.files
+            ],
+        }
 
     def score(self, chain: list[str]) -> tuple:
         queue_penalty = 0 if self.has_free_slot else 1

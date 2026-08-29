@@ -84,15 +84,62 @@ music-fetcher daemon down        # stop slskd
 ### Search and download
 
 ```sh
-music-fetcher search "artist album"          # interactive browse only
+music-fetcher search "artist album"          # Soulseek candidates as JSON
 music-fetcher dl album "aphex twin scarts"   # MusicBrainz-resolved album
 music-fetcher dl album --mbid <release-id>   # skip the lookup
 music-fetcher dl track "song title"          # single track
 ```
 
-By default the candidate picker is interactive. Pass `--yes` to auto-pick the
-best source, or `--no-wait` to queue without downloading immediately. If the
+`search` prints JSON to stdout (no interactive picker). Each result is one
+album-folder candidate with a stable `id`, ranked best-first:
+
+```json
+{
+  "query": "you and i the curtain falls",
+  "count": 3,
+  "results": [
+    {
+      "id": "cbe89b6b9f65",
+      "username": "web-graffiti",
+      "folder": "You and I - The Curtain Falls [US 1999 CD]",
+      "remote_dir": "music\\...\\The Curtain Falls",
+      "formats": ["FLAC"],
+      "file_count": 8,
+      "meets_preference": true,
+      "relevance": 1.0,
+      "files": [{"filename": "...", "size": 123, "extension": "FLAC"}]
+    }
+  ]
+}
+```
+
+By default the `dl` candidate picker is interactive. Pass `--yes` to auto-pick
+the best source, or `--no-wait` to queue without downloading immediately. If the
 preferred format (e.g. FLAC) is unavailable, you are asked before falling back.
+
+#### Agent-friendly flow
+
+`dl album` is **MusicBrainz-first**: it resolves the release, then searches
+Soulseek on the canonical `artist title`. Use `--list` to get JSON candidates
+(each with an `id`) without downloading, then re-run with `--result-id` to grab
+a specific source non-interactively:
+
+```sh
+# discover sources for a resolved album (JSON on stdout, status on stderr)
+music-fetcher dl album --artist "You and I" --album "The Curtain Falls" --list
+
+# download a specific source by id
+id=$(music-fetcher dl album --artist "You and I" --album "The Curtain Falls" \
+       --list | jq -r '.results[0].id')
+music-fetcher dl album --artist "You and I" --album "The Curtain Falls" \
+       --result-id "$id" --no-wait
+```
+
+`dl track` supports the same `--list` / `--result-id` flags. On success the id
+path prints the created job as JSON (`{"job_id", "state", "username",
+"file_count", "remote_dir"}`); an unknown id prints `{"error":
+"result_id_not_found", ...}` and exits non-zero. stdout stays pure JSON on these
+paths — all human-facing status goes to stderr.
 
 ### Queue
 

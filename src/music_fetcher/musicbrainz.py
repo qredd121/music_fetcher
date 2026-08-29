@@ -71,9 +71,12 @@ def search_releases(
 
 def get_release(mbid: str, *, contact: str) -> Release:
     _configure(contact)
-    data = mbngs.get_release_by_id(mbid, includes=["recordings", "media"])
+    data = mbngs.get_release_by_id(mbid, includes=["recordings", "media", "artists"])
     release = data["release"]
-    artist = release.get("artist-credit", [{}])[0].get("artist", {}).get("name", "")
+    artist = (
+        release.get("artist-credit-phrase")
+        or release.get("artist-credit", [{}])[0].get("artist", {}).get("name", "")
+    )
     tracks: list[ReleaseTrack] = []
     for medium in release.get("medium-list", []):
         for track in medium.get("track-list", []):
