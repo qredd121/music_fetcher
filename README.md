@@ -42,6 +42,34 @@ music-fetcher daemon up
 
 Settings come from `~/.config/music-fetcher/config.toml`; secrets and a few paths can be overridden by environment variables (see `.env`). Precedence: environment variable > TOML > built-in default. See `config.example.toml` for every key.
 
+### Excluding directories
+
+Set `paths.exclude` to a list of directories (relative to `paths.music`) that
+should be completely ignored by every library operation — `adopt`, `stats`,
+`dupes`, `verify`, and `art`:
+
+```toml
+[paths]
+exclude = ["I/Incelcore"]
+```
+
+Exclusions are enforced as beets `ignore` globs, so `adopt` skips those trees.
+Items that were already adopted stay in the beets database until you rebuild it;
+after changing `exclude`, run:
+
+```sh
+music-fetcher lib adopt --rebuild
+```
+
+`--rebuild` backs up the beets database to `library.db.bak`, deletes it, and
+re-imports `~/Music` in place (skipping excluded directories), so the database
+never contains excluded items. The raw `lib beet ...` passthrough is not
+filtered.
+
+> `adopt` is strictly in place: it never copies, moves, or rewrites tags. The
+> `import` command still moves staged downloads into `~/Music`, filing them
+> under their first-letter bucket (e.g. `I/Incelcore/...`).
+
 ## Commands
 
 ### Daemon
@@ -96,6 +124,7 @@ the state dir; run `import` again to retry them.
 ```sh
 music-fetcher lib adopt          # register existing ~/Music with beets (as-is, in place)
 music-fetcher lib adopt --autotag
+music-fetcher lib adopt --rebuild   # wipe + regenerate the DB, applying exclusions
 music-fetcher lib stats
 music-fetcher lib dupes
 music-fetcher lib verify         # confirm every item still exists on disk

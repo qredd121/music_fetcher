@@ -29,6 +29,8 @@ class PathsConfig:
     state: Path = field(
         default_factory=lambda: Path("~/.local/state/music-fetcher").expanduser()
     )
+    # Directories relative to `music` that are ignored by all library operations.
+    exclude: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -147,3 +149,34 @@ def ensure_dirs(config: AppConfig) -> None:
     config.paths.state.mkdir(parents=True, exist_ok=True)
     config.paths.downloads.mkdir(parents=True, exist_ok=True)
     config.paths.music.mkdir(parents=True, exist_ok=True)
+
+
+def excluded_ignore_globs(config: AppConfig) -> list[str]:
+    """Glob patterns for beets' ``ignore`` derived from ``paths.exclude``.
+
+    beets applies ``ignore`` patterns with ``fnmatch`` against a single path
+    component (the directory/file *basename*) as it walks the tree, so patterns
+    must be the leaf segment of the excluded path. For ``I/Incelcore`` this
+    yields ``Incelcore``, which makes beets skip that directory during import.
+    """
+    globs: list[str] = []
+    for entry in config.paths.exclude:
+        rel = entry.strip().strip("/").replace("\\", "/")
+        if not rel:
+            continue
+        leaf = rel.rsplit("/", 1)[-1]
+        if leaf and leaf not in globs:
+            globs.append(leaf)
+    return globs
+
+
+def default_library_db() -> Path:
+    """Resolve beets' default library database path.
+
+    music-fetcher does not pin ``library`` in its generated config, so beets
+    uses its default location. Honor ``BEETSDIR`` like beets does, otherwise
+    fall back to ``~/.config/beets/library.db``.
+    """
+    beetsdir = os.environ.get("BEETSDIR")
+    base = Path(beetsdir).expanduser() if beetsdir else Path("~/.config/beets").expanduser()
+    return base / "library.db"

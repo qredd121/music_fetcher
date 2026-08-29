@@ -411,11 +411,40 @@ def lib_adopt(
         False, "--no-incremental", help="Re-scan everything, not just new files."
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show plan without writing."),
+    rebuild: bool = typer.Option(
+        False,
+        "--rebuild",
+        help="Delete and regenerate the beets DB from ~/Music (applies exclusions).",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Skip the confirmation prompt for --rebuild."
+    ),
 ) -> None:
     """Register an existing library (~/Music) with beets, in place."""
     from .beetsbridge import adopt_library
+    from .config import default_library_db, excluded_ignore_globs
 
     config = load_config()
+
+    if rebuild and not dry_run:
+        db = default_library_db()
+        excludes = config.paths.exclude
+        console.print(f"[yellow]rebuild[/yellow] will delete and regenerate {db}")
+        console.print(f"a backup will be saved to {db.with_suffix(db.suffix + '.bak')}")
+        if excludes:
+            console.print("excluding: " + ", ".join(excludes))
+        elif excluded_ignore_globs(config):
+            console.print("excluding: " + ", ".join(excluded_ignore_globs(config)))
+        if not yes:
+            if not sys.stdout.isatty():
+                console.print(
+                    "[red]--rebuild needs confirmation; pass --yes in non-interactive mode[/red]"
+                )
+                raise SystemExit(1)
+            if not confirm("proceed with rebuild?", default=False):
+                console.print("aborted")
+                return
+
     if dry_run:
         console.print(
             f"[dim]would import {config.paths.music} "
@@ -426,6 +455,7 @@ def lib_adopt(
         autotag=autotag,
         incremental=not no_incremental,
         dry_run=dry_run,
+        rebuild=rebuild,
     )
     console.print("[green]adopt complete[/green]")
 
