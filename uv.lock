@@ -396,6 +396,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "typer" },
+    { name = "unidecode" },
 ]
 
 [package.dev-dependencies]
@@ -413,6 +414,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rich", specifier = ">=13" },
     { name = "typer", specifier = ">=0.12" },
+    { name = "unidecode", specifier = ">=1.3" },
 ]
 
 [package.metadata.requires-dev]

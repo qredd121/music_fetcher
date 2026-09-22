@@ -29,8 +29,12 @@ class PathsConfig:
     state: Path = field(
         default_factory=lambda: Path("~/.local/state/music-fetcher").expanduser()
     )
-    # Directories relative to `music` that are ignored by all library operations.
     exclude: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.downloads = Path(self.downloads).expanduser()
+        self.music = Path(self.music).expanduser()
+        self.state = Path(self.state).expanduser()
 
 
 @dataclass

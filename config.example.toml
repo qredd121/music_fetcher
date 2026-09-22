@@ -7,13 +7,10 @@ api_prefix = "/api/v0"
 timeout = 30.0
 
 [paths]
-downloads = "~/Work/personal/music-fetcher/data/downloads"
+downloads = "~/prog/music-fetcher/data/downloads"
 music = "~/Music"
 state = "~/.local/state/music-fetcher"
-# Directories (relative to `music`) ignored by all library operations
-# (adopt, stats, dupes, verify, art). After changing this, run:
-#   music-fetcher lib adopt --rebuild
-exclude = ["I/Incelcore"]
+exclude = []
 
 [search]
 timeout = 45.0
