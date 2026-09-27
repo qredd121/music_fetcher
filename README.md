@@ -179,6 +179,36 @@ music-fetcher lib art            # fetch missing album art
 music-fetcher lib beet ls ...    # run any beet command against the library
 ```
 
+## Streaming with Navidrome
+
+The Docker Compose file also runs [Navidrome](https://www.navidrome.org/), a
+Subsonic-compatible streaming server, alongside slskd. It mounts `~/Music`
+read-only and keeps its own database, playlists, and art cache in
+`./data/navidrome`, so it never modifies your beets-managed files.
+
+```sh
+music-fetcher daemon up          # starts slskd and navidrome together
+docker logs navidrome            # follow the library scan
+```
+
+Navidrome is served over HTTPS at `https://<device-ip>:8443`, reverse-proxied by
+the host's nginx (many Subsonic clients require HTTPS). It is not published on
+plain HTTP; the container only exposes port 4533 on the internal Docker network.
+Open the URL and create the admin account on first load. The certificate is
+self-signed, so accept the browser/client warning or import the server CA
+(`ca-cert.pem`) on your devices.
+
+The library is rescanned every hour (`ND_SCANSCHEDULE`); trigger a manual rescan
+from the web UI after importing new music. `music-fetcher daemon down` stops both
+containers.
+
+### nginx reverse proxy
+
+The TLS termination lives in a separate nginx stack. To reach the `navidrome`
+container by name, nginx joins the `music-fetcher_default` network (declared
+`external: true` in its compose file) and serves an HTTPS `server` block on port
+`8443` that proxies to `http://navidrome:4533`.
+
 ## Development
 
 ```sh

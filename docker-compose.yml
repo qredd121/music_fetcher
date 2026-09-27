@@ -16,3 +16,20 @@ services:
       - SLSKD_WEB_USERNAME=${SLSKD_WEB_USERNAME}
       - SLSKD_WEB_PASSWORD=${SLSKD_WEB_PASSWORD}
       - SLSKD_DOWNLOADS_DIR=/downloads
+
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: unless-stopped
+    user: "1000:1000"
+    expose:
+      - "4533"
+    volumes:
+      - /home/timofei/Music:/music:ro
+      - ./data/navidrome:/data
+    environment:
+      - ND_MUSICFOLDER=/music
+      - ND_DATAFOLDER=/data
+      - ND_SCANSCHEDULE=1h
+      - ND_LOGLEVEL=info
+      - TZ=Europe/Belgrade
