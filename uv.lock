@@ -392,7 +392,7 @@ source = { editable = "." }
 dependencies = [
     { name = "beets" },
     { name = "httpx" },
-    { name = "musicbrainzngs" },
+    { name = "mediafile" },
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "typer" },
@@ -410,7 +410,7 @@ dev = [
 requires-dist = [
     { name = "beets", specifier = ">=2.2" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "musicbrainzngs", specifier = ">=0.7" },
+    { name = "mediafile", specifier = ">=0.12" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rich", specifier = ">=13" },
     { name = "typer", specifier = ">=0.12" },
@@ -422,15 +422,6 @@ dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "respx", specifier = ">=0.21" },
     { name = "ruff", specifier = ">=0.6" },
-]
-
-[[package]]
-name = "musicbrainzngs"
-version = "0.7.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0a/67/3e74ae93d90ceeba72ed1a266dd3ca9abd625f315f0afd35f9b034acedd1/musicbrainzngs-0.7.1.tar.gz", hash = "sha256:ab1c0100fd0b305852e65f2ed4113c6de12e68afd55186987b8ed97e0f98e627", size = 117469, upload-time = "2020-01-11T17:38:47.581Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6d/fd/cef7b2580436910ccd2f8d3deec0f3c81743e15c0eb5b97dde3fbf33c0c8/musicbrainzngs-0.7.1-py2.py3-none-any.whl", hash = "sha256:e841a8f975104c0a72290b09f59326050194081a5ae62ee512f41915090e1a10", size = 25289, upload-time = "2020-01-11T17:38:45.469Z" },
 ]
 
 [[package]]

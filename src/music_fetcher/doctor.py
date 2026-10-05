@@ -6,9 +6,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
-
-from .config import APP_NAME, AppConfig
+from .config import AppConfig
 from .daemon import ComposeError, find_compose_file
 
 
@@ -77,31 +75,12 @@ def _check_beets(config: AppConfig) -> CheckResult:
     return CheckResult("beets", "OK", beet)
 
 
-def _check_musicbrainz(config: AppConfig) -> CheckResult:
-    headers = {"User-Agent": f"{APP_NAME}/0.1.0 ({config.musicbrainz_contact or 'unset'})"}
-    try:
-        response = httpx.get(
-            "https://musicbrainz.org/ws/2/release",
-            params={"limit": 1},
-            headers=headers,
-            timeout=8.0,
-        )
-    except httpx.HTTPError:
-        return CheckResult("musicbrainz", "WARN", "unreachable")
-    if response.status_code < 500:
-        if not config.musicbrainz_contact:
-            return CheckResult("musicbrainz", "WARN", "reachable, MUSICBRAINZ_CONTACT unset")
-        return CheckResult("musicbrainz", "OK", "reachable")
-    return CheckResult("musicbrainz", "WARN", f"HTTP {response.status_code}")
-
-
 CHECKS = (
     _check_api_key,
     _check_slskd,
     _check_dirs,
     _check_compose,
     _check_beets,
-    _check_musicbrainz,
 )
 
 

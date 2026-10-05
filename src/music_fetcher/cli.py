@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 from rich.progress import Progress
+from rich.prompt import Confirm
 from rich.table import Table
 
 from . import __version__, daemon
 from . import doctor as doctor_mod
 from .config import ensure_dirs, load_config
+from .importer import ImportResult, import_source, in_quarantine, quarantine_root
 from .jobs import ACTIVE_STATES, Runner
 from .jobs.db import JobStore
-from .musicbrainz import Release, get_release, search_releases
 from .selection import (
     ScoredCandidate,
     best_single_file,
@@ -23,6 +24,7 @@ from .selection import (
     score_candidates,
 )
 from .slskd import SlskdClient, SlskdError
+from .tags import merge_meta, read_meta, resolve, write_meta, write_plan
 from .ui import (
     confirm,
     console,
@@ -51,12 +53,10 @@ def _main(
 
 
 def _emit_json(payload: object) -> None:
-    """Write a JSON document to stdout for machine/agent consumption."""
     sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def _err_console():
-    """A Rich console bound to stderr, so stdout stays pure JSON."""
     from rich.console import Console
 
     return Console(stderr=True)
@@ -139,7 +139,6 @@ def jobs_show(job_id: str) -> None:
         "kind": job.kind,
         "query": job.query,
         "state": job.state,
-        "mbid": job.mbid,
         "username": job.username,
         "folder": job.folder,
         "expected_files": job.expected_files,
@@ -275,7 +274,7 @@ def daemon_logs(
 
 @app.command()
 def doctor() -> None:
-    """Check slskd, paths, beets and MusicBrainz connectivity."""
+    """Check slskd, paths and beets."""
     config = load_config()
     results = doctor_mod.run_all_checks(config)
     failed = False
@@ -302,7 +301,6 @@ def search(
     effective_timeout = timeout if timeout is not None else config.search.timeout
     config.search.timeout = effective_timeout
 
-    # Seed relevance from the free-text query so ranking is meaningful.
     candidates = _search_candidates(config, query, album=query)
     candidates = candidates[:max_results]
     chain = config.download.format_preference
@@ -323,110 +321,266 @@ lib_app = typer.Typer(help="Manage the existing music library.", no_args_is_help
 app.add_typer(lib_app, name="lib")
 
 
-def _resolve_job(prefix: str):
-    store = _store()
-    matches = [job for job in store.list() if job.id.startswith(prefix)]
-    if len(matches) == 1:
-        return matches[0]
-    if not matches:
-        console.print(f"[red]no job matching {prefix}[/red]")
-    else:
-        console.print(f"[red]ambiguous prefix {prefix}[/red]")
+tags_app = typer.Typer(
+    help="Inspect and fix tags of staged or quarantined folders.", no_args_is_help=True
+)
+app.add_typer(tags_app, name="tags")
+
+
+def _fail(message: str, error: str, **extra) -> NoReturn:
+    _err_console().print(f"[red]{message}[/red]")
+    _emit_json({"error": error, **extra})
     raise SystemExit(1)
+
+
+def _is_single(job) -> bool:
+    return job is not None and job.kind == "track"
+
+
+def _job_meta(job) -> dict | None:
+    return job.payload.get("meta") if job is not None else None
+
+
+def _job_path(config, job) -> Path | None:
+    if not job.folder:
+        return None
+    path = Path(job.folder)
+    if path.exists():
+        return path
+    fallback = quarantine_root(config) / path.name
+    return fallback if fallback.exists() else None
+
+
+def _job_for_path(config, store, path: Path):
+    target = path.resolve()
+    for job in store.list():
+        job_path = _job_path(config, job)
+        if job_path is not None and job_path.resolve() == target:
+            return job
+    return None
+
+
+def _resolve_target(config, store, target: str):
+    for candidate in (Path(target).expanduser(), quarantine_root(config) / target):
+        if candidate.is_dir():
+            return _job_for_path(config, store, candidate), candidate
+    matches = [job for job in store.list() if job.id.startswith(target)]
+    if len(matches) != 1:
+        _fail(f"no folder or unique job matching {target}", "target_not_found", target=target)
+    job = matches[0]
+    path = _job_path(config, job)
+    if path is None:
+        _fail(f"job {job.id[:8]} has no folder on disk", "folder_missing", job_id=job.id)
+    return job, path
+
+
+def _record(store, job, result: ImportResult) -> None:
+    if job is None:
+        return
+    if result.state == "imported":
+        store.update_state(job.id, "imported", error="")
+        return
+    fields = {"folder": str(result.source)} if result.state == "quarantined" else None
+    store.update_state(job.id, result.state, error=result.detail, set_fields=fields)
+
+
+_RESULT_STYLES = {"imported": "green", "quarantined": "magenta", "failed": "red"}
+
+
+def _print_result(out, label: str, result: ImportResult) -> None:
+    style = _RESULT_STYLES.get(result.state, "yellow")
+    if result.state == "imported":
+        out.print(f"[{style}]imported[/{style}] {label}")
+        return
+    out.print(f"[{style}]{result.state}[/{style}] {label}: {result.detail}")
+    if result.plan and result.plan["missing"]:
+        for name, fields in result.plan["missing"].items():
+            out.print(f"  [dim]{name}[/dim] missing {', '.join(fields)}")
+    if result.state == "quarantined":
+        out.print(f"  fix with: music-fetcher tags show {result.source.name!r}")
 
 
 @app.command("import")
 def import_(
-    job_id: str = typer.Argument(None, help="Job prefix; defaults to all downloaded."),
-    yes: bool = typer.Option(False, "--yes", help="Non-interactive autotag."),
+    target: str = typer.Argument(
+        None, help="Job prefix, folder path or quarantine folder name."
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Non-interactive; JSON on stdout."),
     staged: bool = typer.Option(
         False, "--staged", help="Also import orphaned folders in the downloads dir."
     ),
 ) -> None:
-    """Import staged downloads into the beets library."""
-    from .beetsbridge import import_path
+    """Check tags of staged downloads and file them into the library.
 
+    Folders with missing or inconsistent tags are quarantined; inspect them
+    with ``tags show`` and fix them with ``tags set``.
+    """
     config = load_config()
-    store = _store()
-    jobs = [_resolve_job(job_id)] if job_id else store.list(states=("downloaded",))
-    quarantined = [] if job_id else store.list(states=("quarantined",))
+    store = JobStore(config.paths.state / "jobs.db")
+    out = _err_console() if yes else console
+    sources: list[tuple[object, Path]] = []
 
-    sources: list[tuple[object, Path, bool]] = []
-    for job in jobs:
-        sources.append((job, Path(job.folder or ""), job.kind == "track"))
+    if target:
+        sources.append(_resolve_target(config, store, target))
+    else:
+        for job in store.list(states=("downloaded", "quarantined")):
+            path = _job_path(config, job)
+            if path is not None:
+                sources.append((job, path))
+            elif job.state == "quarantined":
+                store.update_state(job.id, "imported", error="")
+                out.print(f"[green]imported[/green] {job.query} [dim](already consumed)[/dim]")
+            else:
+                store.update_state(job.id, "failed", error="staged folder missing")
+                out.print(f"[red]{job.id[:8]} staged path missing: {job.folder}[/red]")
+        known = {path.resolve() for _, path in sources}
+        job_names = {Path(job.folder).name for job in store.list() if job.folder}
+        roots = [quarantine_root(config)]
+        if staged:
+            roots.append(config.paths.downloads)
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for entry in sorted(root.iterdir()):
+                if not entry.is_dir() or entry.resolve() in known:
+                    continue
+                if root == config.paths.downloads and entry.name in job_names:
+                    continue
+                sources.append((None, entry))
 
-    if staged:
-        imported_dirs = {Path(job.folder or "").name for job in store.list()}
-        for entry in sorted(config.paths.downloads.iterdir()):
-            if entry.is_dir() and entry.name not in imported_dirs:
-                sources.append((None, entry, False))
+    results = []
+    for job, path in sources:
+        label = job.id[:8] if job is not None else path.name
+        out.print(f"importing {label} [dim]{path}[/dim]")
+        result = import_source(config, path, _job_meta(job), singletons=_is_single(job))
+        _record(store, job, result)
+        _print_result(out, label, result)
+        results.append({"job_id": job.id if job is not None else None, **result.to_dict()})
 
-    if not sources and not quarantined:
-        console.print("nothing to import")
+    if not sources:
+        out.print("nothing to import")
+    if yes:
+        _emit_json({"count": len(results), "results": results})
+
+
+@tags_app.command("show")
+def tags_show(
+    target: str = typer.Argument(..., help="Job prefix, folder path or quarantine folder name."),
+) -> None:
+    """Print current tags, proposed tags and what is missing, as JSON."""
+    config = load_config()
+    store = JobStore(config.paths.state / "jobs.db")
+    job, path = _resolve_target(config, store, target)
+    meta = merge_meta(_job_meta(job), read_meta(path))
+    plan = resolve(path, meta, singletons=_is_single(job))
+    _emit_json({"job_id": job.id if job is not None else None, "meta": meta, **plan.to_dict()})
+
+
+def _print_plan(out, plan) -> None:
+    for entry in plan.files:
+        for name, (old, new) in entry.changes.items():
+            out.print(f"[dim]{entry.file}[/dim] {name}: {old!r} -> [bold]{new!r}[/bold]")
+    for name, fields in plan.missing.items():
+        out.print(f"[magenta]{name}[/magenta] still missing {', '.join(fields)}")
+    for problem in plan.problems:
+        out.print(f"[magenta]{problem}[/magenta]")
+
+
+@tags_app.command("set")
+def tags_set(
+    target: str = typer.Argument(..., help="Job prefix, folder path or quarantine folder name."),
+    album_artist: str | None = typer.Option(None, "--album-artist"),
+    artist: str | None = typer.Option(None, "--artist"),
+    album: str | None = typer.Option(None, "--album"),
+    year: int | None = typer.Option(None, "--year"),
+    file: str | None = typer.Option(
+        None, "--file", help="File index (from tags show) or relative path."
+    ),
+    title: str | None = typer.Option(None, "--title"),
+    track: int | None = typer.Option(None, "--track"),
+    disc: int | None = typer.Option(None, "--disc"),
+    meta_json: str | None = typer.Option(
+        None, "--meta", help='JSON: {"album": {...}, "files": {"<index|path>": {...}}}.'
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan, write nothing."),
+    yes: bool = typer.Option(False, "--yes", help="Apply without confirmation."),
+    no_import: bool = typer.Option(False, "--no-import", help="Save overrides only."),
+) -> None:
+    """Override tags of a staged or quarantined folder, then import it.
+
+    Album-level options apply to every file; ``--title``/``--track``/``--disc``
+    apply to the file given by ``--file``. Overrides are saved in the folder
+    and survive retries.
+    """
+    config = load_config()
+    store = JobStore(config.paths.state / "jobs.db")
+    job, path = _resolve_target(config, store, target)
+    singletons = _is_single(job)
+    existing = read_meta(path)
+    names = [e.file for e in resolve(path, merge_meta(_job_meta(job), existing)).files]
+
+    def key_for(ref: str) -> str:
+        if ref.isdigit() and 1 <= int(ref) <= len(names):
+            return names[int(ref) - 1]
+        if ref in names:
+            return ref
+        _fail(f"unknown file {ref}", "file_not_found", file=ref)
+
+    update: dict = {"album": {}, "files": {}}
+    if meta_json:
+        try:
+            data = json.loads(meta_json)
+        except json.JSONDecodeError as error:
+            _fail(f"invalid --meta: {error}", "invalid_meta")
+        update["album"].update(data.get("album") or {})
+        for ref, values in (data.get("files") or {}).items():
+            update["files"].setdefault(key_for(str(ref)), {}).update(values or {})
+
+    album_level = {"albumartist": album_artist, "album": album, "year": year}
+    file_level = {"title": title, "track": track, "disc": disc}
+    (file_level if file else album_level)["artist"] = artist
+    update["album"].update({k: v for k, v in album_level.items() if v is not None})
+    per_file = {k: v for k, v in file_level.items() if v is not None}
+    if per_file:
+        if file is None and len(names) != 1:
+            _fail("--title/--track/--disc need --file", "file_required")
+        ref = key_for(file) if file is not None else names[0]
+        update["files"].setdefault(ref, {}).update(per_file)
+    if not update["album"] and not update["files"]:
+        _fail("nothing to set", "nothing_to_set")
+
+    new_meta = merge_meta(existing, update)
+    plan = resolve(path, merge_meta(_job_meta(job), new_meta), singletons=singletons)
+    report = {
+        "job_id": job.id if job is not None else None,
+        "dry_run": dry_run,
+        "meta": new_meta,
+        **plan.to_dict(),
+    }
+    if dry_run:
+        _emit_json(report)
         return
+    if not yes:
+        if not sys.stdin.isatty():
+            _fail("confirmation required; pass --yes", "confirmation_required")
+        err = _err_console()
+        _print_plan(err, plan)
+        if not Confirm.ask("apply these tags?", default=False, console=err):
+            _fail("aborted", "aborted")
 
-    interactive = not yes and sys.stdout.isatty()
-    handled_dirs: set[str] = set()
-    for job, source, singletons in sources:
-        if not source.exists():
-            if job is not None:
-                console.print(f"[red]{job.id[:8]} staged path missing: {source}[/red]")
-            continue
-        handled_dirs.add(source.name)
-        label = job.id[:8] if job is not None else source.name
-        console.print(f"importing {label} [dim]{source}[/dim]")
-        mbid = job.mbid if (job is not None and job.kind == "album") else None
-        outcome = import_path(
-            config,
-            source,
-            interactive=interactive,
-            singletons=singletons,
-            mbid=mbid,
-        )
-        if outcome.state == "imported":
-            if job is not None:
-                store.update_state(job.id, "imported", error=None)
-            console.print(f"[green]imported[/green] {source.name}")
-        elif outcome.state == "quarantined":
-            if job is not None:
-                store.update_state(job.id, "quarantined", error=outcome.detail)
-            console.print(f"[magenta]quarantined[/magenta] {source.name}")
-        else:
-            if job is not None:
-                store.update_state(job.id, "failed", error=outcome.detail)
-            console.print(f"[red]failed[/red] {source.name}: {outcome.detail}")
-
-    for job in quarantined:
-        quarantine_dir = (
-            config.paths.state / "quarantine" / Path(job.folder or "").name
-        )
-        if not quarantine_dir.exists():
-            store.update_state(job.id, "imported", error=None)
-            console.print(
-                f"[green]imported[/green] {job.query} [dim](quarantine already consumed)[/dim]"
-            )
-            continue
-        console.print(f"retrying quarantined {job.id[:8]} [dim]{quarantine_dir}[/dim]")
-        outcome = import_path(
-            config,
-            quarantine_dir,
-            interactive=interactive,
-            singletons=job.kind == "track",
-            mbid=job.mbid if job.kind == "album" else None,
-        )
-        if outcome.state == "imported":
-            store.update_state(job.id, "imported", error=None)
-            shutil.rmtree(quarantine_dir, ignore_errors=True)
-            console.print(f"[green]imported[/green] {job.query}")
-        else:
-            console.print(f"[magenta]still quarantined[/magenta] {job.query}")
-
+    write_meta(path, new_meta)
+    if in_quarantine(config, path):
+        write_plan(path, plan)
+    report["import"] = None
+    if plan.ok and not no_import:
+        result = import_source(config, path, _job_meta(job), singletons=singletons)
+        _record(store, job, result)
+        _print_result(_err_console(), path.name, result)
+        report["import"] = result.to_dict()
+    _emit_json(report)
 
 @lib_app.command("adopt")
 def lib_adopt(
-    autotag: bool = typer.Option(
-        False, "--autotag", help="Autotag existing files instead of as-is import."
-    ),
     no_incremental: bool = typer.Option(
         False, "--no-incremental", help="Re-scan everything, not just new files."
     ),
@@ -468,11 +622,10 @@ def lib_adopt(
     if dry_run:
         console.print(
             f"[dim]would import {config.paths.music} "
-            f"({'autotag' if autotag else 'as-is'}, in place)…[/dim]"
+            "(as-is, in place)…[/dim]"
         )
     adopt_library(
         config,
-        autotag=autotag,
         incremental=not no_incremental,
         dry_run=dry_run,
         rebuild=rebuild,
@@ -535,46 +688,6 @@ def lib_beet(ctx: typer.Context) -> None:
     raise SystemExit(passthrough(load_config(), ctx.args))
 
 
-def _choose_release(
-    query: str, mbid: str | None, config, auto: bool, quiet: bool = False
-) -> Release | None:
-    # In quiet mode (JSON paths) keep stdout clean: status + notices go to stderr.
-    status_console = _err_console() if quiet else console
-    if mbid:
-        return get_release(mbid, contact=config.musicbrainz_contact)
-    with status_console.status("searching MusicBrainz..."):
-        summaries = search_releases(query, contact=config.musicbrainz_contact)
-    if not summaries:
-        status_console.print("[yellow]no MusicBrainz releases matched[/yellow]")
-        return None
-    if auto:
-        chosen = summaries[0]
-    else:
-        table = Table(title="MusicBrainz releases")
-        table.add_column("#", justify="right")
-        table.add_column("Artist")
-        table.add_column("Title")
-        table.add_column("Date")
-        table.add_column("Type")
-        table.add_column("Tracks", justify="right")
-        for index, summary in enumerate(summaries):
-            table.add_row(
-                str(index),
-                summary.artist,
-                summary.title,
-                summary.date,
-                summary.primary_type,
-                str(summary.track_count or "?"),
-            )
-        console.print(table)
-        index = pick_index(len(summaries), allow_refresh=False)
-        if index is None:
-            return None
-        chosen = summaries[index]
-    status_console.print(f"release: [bold]{chosen.artist} — {chosen.title}[/bold]")
-    return get_release(chosen.mbid, contact=config.musicbrainz_contact)
-
-
 def _pick_candidate(candidates, chain: list[str], expected: int | None, auto: bool):
     while True:
         if auto:
@@ -633,12 +746,33 @@ def _wait_for_job(config, store, job) -> None:
         console.print(f"[red]{final.state}:[/red] {final.error}")
 
 
+def _choose_candidate(candidates, chain, expected, result_id, yes):
+    if result_id is not None:
+        chosen = _find_by_id(candidates, result_id)
+        if chosen is None:
+            _fail(f"no candidate with id {result_id}", "result_id_not_found", id=result_id)
+        return chosen
+    if not candidates:
+        console.print("[yellow]no usable sources found[/yellow]")
+        return None
+    chosen = _pick_candidate(candidates, chain, expected, auto=yes)
+    if chosen is None:
+        return None
+    if not _format_gate(chosen, chain, auto=yes):
+        console.print("aborted")
+        return None
+    return chosen
+
+
 @dl_app.command("album")
 def dl_album(
-    query: str = typer.Argument(None, help='e.g. "i hate myself 10 songs"'),
-    artist: str = typer.Option(None, "--artist", "-a", help="Artist name (precise)."),
-    album: str = typer.Option(None, "--album", "-b", help="Album title (precise)."),
-    mbid: str | None = typer.Option(None, help="MusicBrainz release ID, skips lookup."),
+    query: str = typer.Argument(None, help="Override the Soulseek search text."),
+    artist: str = typer.Option(..., "--artist", "-a", help="Album artist, written to tags."),
+    album: str = typer.Option(..., "--album", "-b", help="Album title, written to tags."),
+    year: int | None = typer.Option(None, "--year", "-y", help="Release year, written to tags."),
+    tracks: int | None = typer.Option(
+        None, "--tracks", help="Expected track count, used for ranking."
+    ),
     result_id: str | None = typer.Option(
         None, "--result-id", help="Download a specific source by id (from --list)."
     ),
@@ -648,85 +782,53 @@ def dl_album(
     yes: bool = typer.Option(False, "--yes", help="Non-interactive, auto-pick best."),
     no_wait: bool = typer.Option(False, "--no-wait", help="Queue without downloading now."),
 ) -> None:
-    """Resolve an album on MusicBrainz, find it on Soulseek, download it.
+    """Find an album on Soulseek and download it.
 
-    MusicBrainz is authoritative: the release is resolved first, then the
-    Soulseek search runs on the canonical ``artist title``. Use ``--list`` to
+    ``--artist``, ``--album`` and ``--year`` are authoritative: they are written
+    to the files on import, overriding the uploader's tags. Use ``--list`` to
     get JSON candidates (each with an ``id``), then re-run with ``--result-id``.
     """
-    if not query and not mbid and not (artist and album):
-        console.print("[red]need a query, --artist/--album, or --mbid[/red]")
-        raise SystemExit(1)
     config = load_config()
     ensure_dirs(config)
-    if artist and album:
-        mb_query = f'artist:"{artist}" AND release:"{album}"'
-    else:
-        mb_query = query or ""
-    # --list / --result-id are non-interactive discovery paths: auto-pick the MB
-    # release and keep stdout pure JSON (status goes to stderr).
-    json_mode = list_sources or result_id is not None
-    auto_mb = yes or json_mode
-    release = _choose_release(mb_query, mbid, config, auto=auto_mb, quiet=json_mode)
-    if release is None:
-        return
-
     chain = config.download.format_preference
-    search_text = f"{release.artist} {release.title}"
+    search_text = query or f"{artist} {album}"
     candidates = _search_candidates(
-        config,
-        search_text,
-        artist=release.artist,
-        album=release.title,
-        expected_tracks=release.track_count,
+        config, search_text, artist=artist, album=album, expected_tracks=tracks
     )
 
     if list_sources:
         _emit_json(
             {
-                "release": {
-                    "mbid": release.mbid,
-                    "artist": release.artist,
-                    "title": release.title,
-                    "track_count": release.track_count,
-                },
+                "query": search_text,
+                "artist": artist,
+                "album": album,
+                "year": year,
                 "count": len(candidates),
                 "results": [c.to_dict(chain) for c in candidates],
             }
         )
         return
 
-    if not candidates:
-        console.print("[yellow]no usable sources found[/yellow]")
+    chosen = _choose_candidate(candidates, chain, tracks, result_id, yes)
+    if chosen is None:
         return
 
-    if result_id is not None:
-        chosen = _find_by_id(candidates, result_id)
-        if chosen is None:
-            _emit_json({"error": "result_id_not_found", "id": result_id})
-            raise SystemExit(1)
-    else:
-        chosen = _pick_candidate(candidates, chain, release.track_count, auto=yes)
-        if chosen is None:
-            return
-        if not _format_gate(chosen, chain, auto=yes):
-            console.print("aborted")
-            return
-
+    meta_album = {"albumartist": artist, "album": album}
+    if year:
+        meta_album["year"] = year
     files = chosen.files
     remote_dir = common_remote_dir(files)
     store = JobStore(config.paths.state / "jobs.db")
     job = store.create(
         kind="album",
-        query=f"{release.artist} - {release.title}",
-        mbid=release.mbid,
+        query=f"{artist} - {album}",
         expected_files=len(files),
         payload={
             "username": chosen.username,
             "remote_dir": remote_dir,
             "files": [{"filename": f.filename, "size": f.size} for f in files],
-            "expected_tracks": release.track_count,
-            "tracklist": [t.title for t in release.tracks],
+            "expected_tracks": tracks,
+            "meta": {"album": meta_album},
         },
     )
     if result_id is not None:
@@ -740,7 +842,11 @@ def dl_album(
 
 @dl_app.command("track")
 def dl_track(
-    query: str = typer.Argument(..., help="Search text for a single track."),
+    query: str = typer.Argument(None, help="Search text; defaults to '<artist> <title>'."),
+    artist: str | None = typer.Option(
+        None, "--artist", "-a", help="Track artist, written to tags."
+    ),
+    title: str | None = typer.Option(None, "--title", "-t", help="Track title, written to tags."),
     result_id: str | None = typer.Option(
         None, "--result-id", help="Download a specific source by id (from --list)."
     ),
@@ -755,37 +861,28 @@ def dl_track(
     Use ``--list`` to get JSON candidates (each with an ``id``), then re-run with
     ``--result-id`` to download a specific source non-interactively.
     """
+    if not query and not (artist and title):
+        _fail("need a query or --artist and --title", "missing_query")
     config = load_config()
     ensure_dirs(config)
     chain = config.download.format_preference
-    candidates = _search_candidates(config, query, expected_tracks=1)
+    search_text = query or f"{artist} {title}"
+    terms = f"{artist or ''} {title or ''}".strip() or search_text
+    candidates = _search_candidates(config, search_text, album=terms, expected_tracks=1)
 
     if list_sources:
         _emit_json(
             {
-                "query": query,
+                "query": search_text,
                 "count": len(candidates),
                 "results": [c.to_dict(chain) for c in candidates],
             }
         )
         return
 
-    if not candidates:
-        console.print("[yellow]no usable sources found[/yellow]")
+    chosen = _choose_candidate(candidates, chain, None, result_id, yes)
+    if chosen is None:
         return
-
-    if result_id is not None:
-        chosen = _find_by_id(candidates, result_id)
-        if chosen is None:
-            _emit_json({"error": "result_id_not_found", "id": result_id})
-            raise SystemExit(1)
-    else:
-        chosen = _pick_candidate(candidates, chain, None, auto=yes)
-        if chosen is None:
-            return
-        if not _format_gate(chosen, chain, auto=yes):
-            console.print("aborted")
-            return
 
     files = chosen.files
     if result_id is not None or yes or len(files) == 1:
@@ -804,17 +901,19 @@ def dl_track(
             return
         selected_files = [files[index]]
 
+    meta_track = {k: v for k, v in {"artist": artist, "title": title}.items() if v}
     remote_dir = common_remote_dir(selected_files)
     store = JobStore(config.paths.state / "jobs.db")
     job = store.create(
         kind="track",
-        query=query,
+        query=query or f"{artist} - {title}",
         expected_files=len(selected_files),
         payload={
             "username": chosen.username,
             "remote_dir": remote_dir,
             "filenames": [f.filename for f in selected_files],
             "files": [{"filename": f.filename, "size": f.size} for f in selected_files],
+            "meta": {"album": meta_track},
         },
     )
     if result_id is not None:
@@ -832,7 +931,6 @@ def dl_track(
     if no_wait:
         return
     _wait_for_job(config, store, job)
-
 
 @app.command()
 def version() -> None:

@@ -14,7 +14,6 @@ def _no_dotenv(monkeypatch):
         "SEARCH_TIMEOUT",
         "DOWNLOAD_TIMEOUT",
         "SLSKD_BASE_URL",
-        "MUSICBRAINZ_CONTACT",
         "LOG_LEVEL",
         "SLSKD_API_KEY",
     ):

@@ -4,6 +4,8 @@ import hashlib
 import re
 from dataclasses import dataclass
 
+from unidecode import unidecode
+
 from .slskd import SearchFile, SearchResult
 
 AUDIO_EXTENSIONS = {
@@ -146,7 +148,7 @@ class ScoredCandidate:
 
 
 def _tokenize(text: str) -> set[str]:
-    return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) > 1}
+    return {t for t in re.split(r"[^a-z0-9]+", unidecode(text).lower()) if len(t) > 1}
 
 
 def _relevance(

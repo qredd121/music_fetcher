@@ -1,4 +1,3 @@
-musicbrainz_contact = "you@example.com"
 log_level = "INFO"
 
 [slskd]
@@ -25,5 +24,4 @@ queue_wait_seconds = 600.0
 
 [beets]
 plugins = ["fetchart", "duplicates"]
-quiet_fallback = "skip"
 move_imported = true

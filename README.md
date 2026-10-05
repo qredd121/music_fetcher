@@ -5,7 +5,7 @@ A CLI that wraps [slskd](https://github.com/slskd/slskd) (Soulseek) and [beets](
 ## How it works
 
 - **slskd** runs in Docker and talks to the Soulseek network. music-fetcher controls the container and drives its REST API.
-- **beets** handles tagging and library organization. music-fetcher shells out to `beet`, layering its own settings on top of your existing beets configuration and library.
+- **beets** handles library organization (file layout, duplicates, cover art). music-fetcher shells out to `beet` with its own generated config. There is no online metadata lookup: tags come from the `dl` arguments, the files themselves, and folder/file names.
 - A **SQLite job queue** in the state directory tracks every download so it survives restarts.
 
 ## Requirements
@@ -85,9 +85,10 @@ music-fetcher daemon down        # stop slskd
 
 ```sh
 music-fetcher search "artist album"          # Soulseek candidates as JSON
-music-fetcher dl album "aphex twin scarts"   # MusicBrainz-resolved album
-music-fetcher dl album --mbid <release-id>   # skip the lookup
-music-fetcher dl track "song title"          # single track
+music-fetcher dl album -a "Aphex Twin" -b "Selected Ambient Works 85-92" -y 1992
+music-fetcher dl album -a "Aphex Twin" -b "SAW 85-92" "aphex twin saw"   # custom search text
+music-fetcher dl track -a "Aphex Twin" -t "Xtal"
+music-fetcher dl track "song title"          # free-text track search
 ```
 
 `search` prints JSON to stdout (no interactive picker). Each result is one
@@ -119,10 +120,12 @@ preferred format (e.g. FLAC) is unavailable, you are asked before falling back.
 
 #### Agent-friendly flow
 
-`dl album` is **MusicBrainz-first**: it resolves the release, then searches
-Soulseek on the canonical `artist title`. Use `--list` to get JSON candidates
-(each with an `id`) without downloading, then re-run with `--result-id` to grab
-a specific source non-interactively:
+`dl album` requires `--artist` and `--album` (`--year` optional, `--tracks N`
+improves ranking). These values are authoritative: they are stored with the job
+and written to the files on import, overriding the uploader's tags. The search
+text defaults to `artist album`; pass a positional query to override it. Use
+`--list` to get JSON candidates (each with an `id`) without downloading, then
+re-run with `--result-id` to grab a specific source non-interactively:
 
 ```sh
 # discover sources for a resolved album (JSON on stdout, status on stderr)
@@ -157,20 +160,46 @@ music-fetcher jobs rm <id>
 Downloads are staged, then imported explicitly:
 
 ```sh
-music-fetcher import              # import all completed downloads
-music-fetcher import <id>         # import one job
-music-fetcher import --yes        # non-interactive autotag
+music-fetcher import              # import completed downloads + retry quarantine
+music-fetcher import <target>     # job id prefix, folder path or quarantine folder name
+music-fetcher import --yes        # JSON summary on stdout
 music-fetcher import --staged     # also sweep orphaned folders in the downloads dir
 ```
 
-Albums that beets cannot confidently tag are moved to a quarantine directory in
-the state dir; run `import` again to retry them.
+For each folder, tags are resolved per field in this order:
+
+1. `dl` arguments and `tags set` overrides
+2. existing file tags
+3. folder name (`(1986) Album`, `1991 - Album`, `Artist - 1999 - Album [FLAC]`,
+   `CD2`) and file name (`01 - Title`, `1-03 Title`)
+
+Albums need `albumartist`, `album`, `year`, `track`, `title`, with `albumartist`,
+`album` and `year` identical across the folder and no duplicate disc/track
+numbers. Singletons need `artist` and `title`. Complete folders get their tags
+written and are moved into `~/Music` by `beet import -A` (no autotag). Anything
+else goes to `<state>/quarantine/<folder>` with a `.mf-plan.json` describing
+what is missing; plain `import` retries every quarantined folder.
+
+### Tags
+
+```sh
+music-fetcher tags show <target>                         # JSON: current, proposed, missing
+music-fetcher tags set <target> --year 1991 --dry-run    # preview the result
+music-fetcher tags set <target> --year 1991 --yes        # save + import
+music-fetcher tags set <target> --file 3 --title "X" --track 3 --yes
+music-fetcher tags set <target> --meta '{"album": {"year": 1991}, "files": {"2": {"title": "Y"}}}' --dry-run
+```
+
+Album-level options (`--album-artist`, `--album`, `--year`, `--artist`) apply to
+every file; `--title`/`--track`/`--disc` apply to the file chosen with `--file`
+(index from `tags show` or relative path). Overrides are saved to
+`.mf-meta.json` inside the folder, so they survive quarantine retries.
+Without `--yes` a TTY confirmation is required. `--no-import` saves only.
 
 ### Library
 
 ```sh
 music-fetcher lib adopt          # register existing ~/Music with beets (as-is, in place)
-music-fetcher lib adopt --autotag
 music-fetcher lib adopt --rebuild   # wipe + regenerate the DB, applying exclusions
 music-fetcher lib stats
 music-fetcher lib dupes

@@ -21,6 +21,6 @@ def configure_logging(override: str | None = None) -> None:
         datefmt="[%X]",
         handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
     )
-    for noisy in ("httpx", "httpcore", "urllib3", "musicbrainzngs"):
+    for noisy in ("httpx", "httpcore", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     _configured = True

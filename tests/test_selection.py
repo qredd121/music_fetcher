@@ -131,3 +131,11 @@ def test_relevance_prefers_matching_artist_album():
         [wrong, right], CHAIN, expected_tracks=10, artist="I Hate Myself", album="10 Songs"
     )
     assert ranked[0].username == "good"
+
+
+def test_relevance_handles_cyrillic():
+    right = _result("good", [("Кино - Ночь\\01 Ночь.flac", 100, "FLAC")])
+    wrong = _result("bad", [("Other - Album\\01 x.flac", 100, "FLAC")])
+    ranked = score_candidates([wrong, right], CHAIN, artist="Кино", album="Ночь")
+    assert ranked[0].username == "good"
+    assert ranked[0].relevance == 1.0

@@ -5,7 +5,7 @@ import json
 from typer.testing import CliRunner
 
 from music_fetcher import cli
-from music_fetcher.musicbrainz import Release, ReleaseTrack
+from music_fetcher.jobs.db import JobStore
 from music_fetcher.slskd.client import SearchFile, SearchResult
 
 runner = CliRunner()
@@ -59,63 +59,76 @@ def test_search_emits_json(monkeypatch, tmp_path):
     assert top["username"] == "good"
 
 
-def _fake_release():
-    return Release(
-        mbid="rel-1",
-        title="Curtain Falls",
-        artist="You and I",
-        date="1999",
-        tracks=[ReleaseTrack(position=str(i), title=f"t{i}", length_ms=None) for i in range(12)],
-    )
+ALBUM_ARGS = ["--artist", "You and I", "--album", "Curtain Falls"]
 
 
-def _patch_release(monkeypatch):
-    monkeypatch.setattr(cli, "_choose_release", lambda *a, **k: _fake_release())
+def test_dl_album_requires_artist_and_album(monkeypatch, tmp_path):
+    _use_tmp_state(monkeypatch, tmp_path)
+    _patch_slskd(monkeypatch)
+    result = runner.invoke(cli.app, ["dl", "album", "you and i", "--list"])
+    assert result.exit_code != 0
 
 
 def test_dl_album_list_outputs_candidates(monkeypatch, tmp_path):
     _use_tmp_state(monkeypatch, tmp_path)
     _patch_slskd(monkeypatch)
-    _patch_release(monkeypatch)
 
-    result = runner.invoke(cli.app, ["dl", "album", "you and i curtain falls", "--list"])
+    result = runner.invoke(cli.app, ["dl", "album", *ALBUM_ARGS, "--year", "1999", "--list"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data["release"]["mbid"] == "rel-1"
-    assert data["release"]["artist"] == "You and I"
+    assert data["artist"] == "You and I"
+    assert data["year"] == 1999
+    assert data["query"] == "You and I Curtain Falls"
+    assert "release" not in data
     assert data["count"] == len(data["results"])
     assert data["results"][0]["username"] == "good"
 
 
-def test_dl_album_result_id_enqueues(monkeypatch, tmp_path):
+def test_dl_album_result_id_enqueues_with_meta(monkeypatch, tmp_path):
     _use_tmp_state(monkeypatch, tmp_path)
     _patch_slskd(monkeypatch)
-    _patch_release(monkeypatch)
     monkeypatch.setattr(cli, "_wait_for_job", lambda *a, **k: None)
 
-    # first discover the id
-    listing = runner.invoke(cli.app, ["dl", "album", "q", "--list"])
+    listing = runner.invoke(cli.app, ["dl", "album", *ALBUM_ARGS, "--list"])
     chosen_id = json.loads(listing.output)["results"][0]["id"]
 
     result = runner.invoke(
-        cli.app, ["dl", "album", "q", "--result-id", chosen_id, "--no-wait"]
+        cli.app,
+        ["dl", "album", *ALBUM_ARGS, "--year", "1999", "--result-id", chosen_id, "--no-wait"],
     )
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert data["username"] == "good"
     assert data["file_count"] == 12
-    assert "job_id" in data
+    job = JobStore(tmp_path / "state" / "jobs.db").get(data["job_id"])
+    assert job.payload["meta"] == {
+        "album": {"albumartist": "You and I", "album": "Curtain Falls", "year": 1999}
+    }
 
 
 def test_dl_album_bad_result_id_errors(monkeypatch, tmp_path):
     _use_tmp_state(monkeypatch, tmp_path)
     _patch_slskd(monkeypatch)
-    _patch_release(monkeypatch)
 
     result = runner.invoke(
-        cli.app, ["dl", "album", "q", "--result-id", "deadbeef", "--no-wait"]
+        cli.app, ["dl", "album", *ALBUM_ARGS, "--result-id", "deadbeef", "--no-wait"]
     )
     assert result.exit_code == 1
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data["error"] == "result_id_not_found"
     assert data["id"] == "deadbeef"
+
+
+def test_dl_track_stores_meta(monkeypatch, tmp_path):
+    _use_tmp_state(monkeypatch, tmp_path)
+    _patch_slskd(monkeypatch)
+    listing = runner.invoke(cli.app, ["dl", "track", "--artist", "A", "--title", "T", "--list"])
+    assert json.loads(listing.output)["query"] == "A T"
+    chosen_id = json.loads(listing.output)["results"][0]["id"]
+    result = runner.invoke(
+        cli.app,
+        ["dl", "track", "--artist", "A", "--title", "T", "--result-id", chosen_id, "--no-wait"],
+    )
+    assert result.exit_code == 0, result.output
+    job = JobStore(tmp_path / "state" / "jobs.db").get(json.loads(result.output)["job_id"])
+    assert job.payload["meta"] == {"album": {"artist": "A", "title": "T"}}

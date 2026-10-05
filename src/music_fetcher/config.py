@@ -57,7 +57,6 @@ class DownloadConfig:
 @dataclass
 class BeetsConfig:
     plugins: list[str] = field(default_factory=lambda: ["fetchart", "duplicates"])
-    quiet_fallback: str = "skip"
     move_imported: bool = True
 
 
@@ -68,7 +67,6 @@ class AppConfig:
     search: SearchConfig
     download: DownloadConfig
     beets: BeetsConfig
-    musicbrainz_contact: str = ""
     log_level: str = "INFO"
 
 
@@ -87,7 +85,6 @@ _ENV_OVERRIDES: dict[tuple[str, str], tuple[str, object]] = {
 }
 
 _TOP_LEVEL_ENV_OVERRIDES: dict[str, tuple[str, type]] = {
-    "musicbrainz_contact": ("MUSICBRAINZ_CONTACT", str),
     "log_level": ("LOG_LEVEL", str),
 }
 
@@ -123,7 +120,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         "search": {},
         "download": {},
         "beets": {},
-        "musicbrainz_contact": "",
         "log_level": "INFO",
     }
     file_data = _load_toml(config_path or DEFAULT_CONFIG_PATH)
@@ -142,7 +138,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         search=_build(SearchConfig, data["search"]),
         download=_build(DownloadConfig, data["download"]),
         beets=_build(BeetsConfig, data["beets"]),
-        musicbrainz_contact=data.get("musicbrainz_contact", ""),
         log_level=str(data.get("log_level", "INFO")).upper(),
     )
     config.slskd.api_key = os.environ.get("SLSKD_API_KEY", "")
