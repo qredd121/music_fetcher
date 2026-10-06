@@ -204,9 +204,12 @@ music-fetcher lib adopt --rebuild   # wipe + regenerate the DB, applying exclusi
 music-fetcher lib stats
 music-fetcher lib dupes
 music-fetcher lib verify         # confirm every item still exists on disk
-music-fetcher lib art            # fetch missing album art
+music-fetcher lib art            # pick up cover images already in album folders
 music-fetcher lib beet ls ...    # run any beet command against the library
 ```
+
+Cover art is never searched online: `fetchart` only uses images that come with
+the album folder. Albums without one fall back to art embedded in the tracks.
 
 ## Streaming with Navidrome
 

@@ -47,6 +47,7 @@ def test_generate_config_pins_directory_and_templates(tmp_path):
     assert doc["paths"]["comp"].startswith("$artist_letter/")
     # No naive %left bucket that dumps empty-artist items into the root.
     assert "%left" not in doc["paths"]["default"]
+    assert doc["fetchart"]["sources"] == ["filesystem"]
 
 
 def test_generate_config_writes_ignore_globs(tmp_path):

@@ -84,6 +84,7 @@ def generate_config(config: AppConfig, overrides: dict | None = None) -> Path:
         "fetchart": {
             "auto": True,
             "minwidth": 300,
+            "sources": ["filesystem"],
         },
     }
     if overrides:
