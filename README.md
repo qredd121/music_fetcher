@@ -50,7 +50,7 @@ should be completely ignored by every library operation — `adopt`, `stats`,
 
 ```toml
 [paths]
-exclude = ["I/Incelcore"]
+exclude = ["B/Beetles"]
 ```
 
 Exclusions are enforced as beets `ignore` globs, so `adopt` skips those trees.
